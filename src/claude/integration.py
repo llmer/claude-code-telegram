@@ -20,6 +20,7 @@ import structlog
 
 from ..config.settings import Settings
 from .exceptions import (
+    ClaudeMCPError,
     ClaudeParsingError,
     ClaudeProcessError,
     ClaudeTimeoutError,
@@ -211,6 +212,10 @@ class ClaudeProcessManager:
         ):
             cmd.extend(["--allowedTools", ",".join(self.config.claude_allowed_tools)])
 
+        # Add MCP server configuration if enabled
+        if self.config.enable_mcp and self.config.mcp_config_path:
+            cmd.extend(["--mcp-config", str(self.config.mcp_config_path)])
+
         logger.debug("Built Claude Code command", command=cmd)
         return cmd
 
@@ -314,6 +319,10 @@ class ClaudeProcessManager:
                 )
 
                 raise ClaudeProcessError(user_friendly_msg)
+
+            # Check for MCP-related errors
+            if "mcp" in error_msg.lower():
+                raise ClaudeMCPError(f"MCP server error: {error_msg}")
 
             # Generic error handling for other cases
             raise ClaudeProcessError(
@@ -520,6 +529,8 @@ class ClaudeProcessManager:
         """Parse final result message."""
         # Extract tools used from messages
         tools_used = []
+        assistant_texts = []  # Collect all assistant text responses
+
         for msg in messages:
             if msg.get("type") == "assistant":
                 message = msg.get("message", {})
@@ -531,9 +542,25 @@ class ClaudeProcessManager:
                                 "timestamp": msg.get("timestamp"),
                             }
                         )
+                    elif block.get("type") == "text":
+                        # Collect text from assistant messages
+                        text = block.get("text", "").strip()
+                        if text:
+                            assistant_texts.append(text)
+
+        # Get content from result, or fallback to collected assistant texts
+        content = result.get("result", "")
+        if not content and assistant_texts:
+            # Fallback: use the last assistant text message
+            content = assistant_texts[-1]
+            logger.debug(
+                "Using fallback content from assistant messages",
+                num_texts=len(assistant_texts),
+                content_length=len(content),
+            )
 
         return ClaudeResponse(
-            content=result.get("result", ""),
+            content=content,
             session_id=result.get("session_id", ""),
             cost=result.get("cost_usd", 0.0),
             duration_ms=result.get("duration_ms", 0),

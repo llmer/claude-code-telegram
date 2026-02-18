@@ -8,6 +8,7 @@ Features:
 - Environment-specific settings
 """
 
+import json
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -133,6 +134,10 @@ class Settings(BaseSettings):
     enable_git_integration: bool = Field(True, description="Enable git commands")
     enable_file_uploads: bool = Field(True, description="Enable file upload handling")
     enable_quick_actions: bool = Field(True, description="Enable quick action buttons")
+    agentic_mode: bool = Field(
+        True,
+        description="Conversational agentic mode (default) vs classic command mode",
+    )
 
     # Monitoring
     log_level: str = Field("INFO", description="Logging level")
@@ -148,16 +153,48 @@ class Settings(BaseSettings):
     webhook_port: int = Field(8443, description="Webhook port")
     webhook_path: str = Field("/webhook", description="Webhook path")
 
+    # Agentic platform settings
+    enable_api_server: bool = Field(False, description="Enable FastAPI webhook server")
+    api_server_port: int = Field(8080, description="Webhook API server port")
+    enable_scheduler: bool = Field(False, description="Enable job scheduler")
+    github_webhook_secret: Optional[str] = Field(
+        None, description="GitHub webhook HMAC secret"
+    )
+    webhook_api_secret: Optional[str] = Field(
+        None, description="Shared secret for generic webhook providers"
+    )
+    notification_chat_ids: Optional[List[int]] = Field(
+        None, description="Default Telegram chat IDs for proactive notifications"
+    )
+
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", case_sensitive=False, extra="ignore"
     )
 
-    @field_validator("allowed_users", mode="before")
+    @field_validator("allowed_users", "notification_chat_ids", mode="before")
     @classmethod
-    def parse_allowed_users(cls, v: Any) -> Optional[List[int]]:
-        """Parse comma-separated user IDs."""
+    def parse_int_list(cls, v: Any) -> Optional[List[int]]:
+        """Parse comma-separated integer lists."""
+        if v is None:
+            return None
+        if isinstance(v, int):
+            return [v]
         if isinstance(v, str):
             return [int(uid.strip()) for uid in v.split(",") if uid.strip()]
+        if isinstance(v, list):
+            return [int(uid) for uid in v]
+        return v  # type: ignore[no-any-return]
+
+    @field_validator("claude_allowed_tools", mode="before")
+    @classmethod
+    def parse_claude_allowed_tools(cls, v: Any) -> Optional[List[str]]:
+        """Parse comma-separated tool names."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return [tool.strip() for tool in v.split(",") if tool.strip()]
+        if isinstance(v, list):
+            return [str(tool) for tool in v]
         return v  # type: ignore[no-any-return]
 
     @field_validator("approved_directory")
@@ -178,11 +215,33 @@ class Settings(BaseSettings):
     @classmethod
     def validate_mcp_config(cls, v: Any, info: Any) -> Optional[Path]:
         """Validate MCP configuration path if MCP is enabled."""
-        # Note: In Pydantic v2, we'll need to check enable_mcp after model creation
-        if v and isinstance(v, str):
+        if not v:
+            return v  # type: ignore[no-any-return]
+        if isinstance(v, str):
             v = Path(v)
-        if v and not v.exists():
+        if not v.exists():
             raise ValueError(f"MCP config file does not exist: {v}")
+        # Validate that the file contains valid JSON with mcpServers
+        try:
+            with open(v) as f:
+                config_data = json.load(f)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"MCP config file is not valid JSON: {e}")
+        if not isinstance(config_data, dict):
+            raise ValueError("MCP config file must contain a JSON object")
+        if "mcpServers" not in config_data:
+            raise ValueError(
+                "MCP config file must contain a 'mcpServers' key. "
+                'Expected format: {"mcpServers": {"server-name": {"command": "...", ...}}}'
+            )
+        if not isinstance(config_data["mcpServers"], dict):
+            raise ValueError(
+                "'mcpServers' must be an object mapping server names to configurations"
+            )
+        if not config_data["mcpServers"]:
+            raise ValueError(
+                "'mcpServers' must contain at least one server configuration"
+            )
         return v  # type: ignore[no-any-return]
 
     @field_validator("log_level")
